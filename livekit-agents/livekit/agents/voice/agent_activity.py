@@ -9,10 +9,11 @@ from collections.abc import AsyncIterable, Coroutine, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
-from opentelemetry import trace
+from opentelemetry import context as otel_context, trace
 
 from livekit import rtc
 from livekit.agents.llm.realtime import MessageGeneration
+from livekit.agents.metrics.base import Metadata
 
 from .. import llm, stt, tts, utils, vad
 from ..llm.tool_context import StopResponse
@@ -359,7 +360,19 @@ class AgentActivity(RecognitionHooks):
         if speech_handle is not None:
             tk1 = _SpeechHandleContextVar.set(speech_handle)
 
-        task = asyncio.create_task(coro, name=name)
+        # Capture the current OpenTelemetry context to ensure proper span nesting
+        current_context = otel_context.get_current()
+
+        # Create a wrapper coroutine that runs in the captured context
+        async def _context_aware_coro() -> Any:
+            # Attach the captured context before running the original coroutine
+            token = otel_context.attach(current_context)
+            try:
+                return await coro
+            finally:
+                otel_context.detach(token)
+
+        task = asyncio.create_task(_context_aware_coro(), name=name)
         self._speech_tasks.append(task)
         task.add_done_callback(lambda _: self._speech_tasks.remove(task))
 
@@ -951,6 +964,11 @@ class AgentActivity(RecognitionHooks):
                     await asyncio.sleep(
                         self.min_consecutive_speech_delay - (time.time() - last_playout_ts)
                     )
+                    # check again if speech is done after sleep delay
+                    if speech.done():
+                        # skip done speech (interrupted during delay)
+                        self._current_speech = None
+                        continue
                 speech._authorize_generation()
                 await speech._wait_for_generation()
                 self._current_speech = None
@@ -1127,7 +1145,7 @@ class AgentActivity(RecognitionHooks):
 
     # region recognition hooks
 
-    def on_start_of_speech(self, ev: vad.VADEvent) -> None:
+    def on_start_of_speech(self, ev: vad.VADEvent | None) -> None:
         self._session._update_user_state("speaking")
 
         if self._false_interruption_timer:
@@ -1135,10 +1153,13 @@ class AgentActivity(RecognitionHooks):
             self._false_interruption_timer.cancel()
             self._false_interruption_timer = None
 
-    def on_end_of_speech(self, ev: vad.VADEvent) -> None:
+    def on_end_of_speech(self, ev: vad.VADEvent | None) -> None:
+        speech_end_time = time.time()
+        if ev:
+            speech_end_time = speech_end_time - ev.silence_duration
         self._session._update_user_state(
             "listening",
-            last_speaking_time=time.time() - ev.silence_duration,
+            last_speaking_time=speech_end_time,
         )
 
         if (
@@ -1402,6 +1423,14 @@ class AgentActivity(RecognitionHooks):
             # await the interrupt to make sure user message is added to the chat context before the new task starts
             await speech_handle.interrupt()
 
+        metadata: Metadata | None = None
+        if isinstance(self.turn_detection, str):
+            metadata = Metadata(model_name="unknown", model_provider=self.turn_detection)
+        elif self.turn_detection is not None:
+            metadata = Metadata(
+                model_name=self.turn_detection.model, model_provider=self.turn_detection.provider
+            )
+
         eou_metrics = EOUMetrics(
             timestamp=time.time(),
             end_of_utterance_delay=info.end_of_utterance_delay,
@@ -1409,6 +1438,7 @@ class AgentActivity(RecognitionHooks):
             on_user_turn_completed_delay=callback_duration,
             speech_id=speech_handle.id,
             last_speaking_time=info.last_speaking_time,
+            metadata=metadata,
         )
         self._session.emit("metrics_collected", MetricsCollectedEvent(metrics=eou_metrics))
 
@@ -1474,6 +1504,7 @@ class AgentActivity(RecognitionHooks):
                     node=self._agent.tts_node,
                     input=audio_source,
                     model_settings=model_settings,
+                    text_transforms=self._session.options.tts_text_transforms,
                 )
                 tasks.append(tts_task)
                 if (
@@ -1615,6 +1646,7 @@ class AgentActivity(RecognitionHooks):
                 node=self._agent.tts_node,
                 input=tts_text_input,
                 model_settings=model_settings,
+                text_transforms=self._session.options.tts_text_transforms,
             )
             tasks.append(tts_task)
             if (
@@ -1775,6 +1807,7 @@ class AgentActivity(RecognitionHooks):
             )
 
         if generated_msg:
+            chat_ctx.insert(generated_msg)
             self._agent._chat_ctx.insert(generated_msg)
             self._session._conversation_item_added(generated_msg)
             current_span.set_attribute(
@@ -2007,6 +2040,7 @@ class AgentActivity(RecognitionHooks):
                                 node=self._agent.tts_node,
                                 input=tts_text_input,
                                 model_settings=model_settings,
+                                text_transforms=self._session.options.tts_text_transforms,
                             )
 
                             if (
