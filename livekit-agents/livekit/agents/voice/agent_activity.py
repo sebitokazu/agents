@@ -1051,12 +1051,8 @@ class AgentActivity(RecognitionHooks):
         if self.vad is None:
             self._session._update_user_state("speaking")
 
-        # self.interrupt() is going to raise when allow_interruptions is False, llm.InputSpeechStartedEvent is only fired by the server when the turn_detection is enabled.  # noqa: E501
-        # When using the server-side turn_detection, we don't allow allow_interruptions to be False.
         try:
-            self.interrupt(
-                omit_rt_interrupt=True
-            )  # input_speech_started is also interrupting on the serverside realtime session  # noqa: E501
+            self.interrupt(omit_rt_interrupt=True)
         except RuntimeError:
             logger.exception(
                 "RealtimeAPI input_speech_started, but current speech is not interruptable, this should never happen!"  # noqa: E501
