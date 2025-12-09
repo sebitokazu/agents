@@ -875,6 +875,9 @@ class AgentActivity(RecognitionHooks):
         )
 
         if isinstance(self.llm, llm.RealtimeModel):
+            # see: https://github.com/livekit/agents/issues/3834 for more details
+            if instructions:
+                instructions = "\n".join([self._agent.instructions, instructions])
             self._create_speech_task(
                 self._realtime_reply_task(
                     speech_handle=handle,
