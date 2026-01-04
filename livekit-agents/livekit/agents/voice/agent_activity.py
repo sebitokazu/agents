@@ -936,9 +936,7 @@ class AgentActivity(RecognitionHooks):
 
         return interrupted_speeches
 
-    def interrupt(
-        self, *, force: bool = False, omit_rt_interrupt: bool = False
-    ) -> asyncio.Future[None]:
+    def interrupt(self, *, force: bool = False) -> asyncio.Future[None]:
         """Interrupt the current speech generation and any queued speeches.
 
         Returns:
@@ -959,7 +957,7 @@ class AgentActivity(RecognitionHooks):
             speech.interrupt(force=force)
             interrupted_speeches.append(speech)
 
-        if self._rt_session is not None and not omit_rt_interrupt:
+        if self._rt_session is not None:
             self._rt_session.interrupt()
 
         if not interrupted_speeches:
@@ -1116,8 +1114,10 @@ class AgentActivity(RecognitionHooks):
         if self.vad is None:
             self._session._update_user_state("speaking")
 
+        # self.interrupt() is going to raise when allow_interruptions is False, llm.InputSpeechStartedEvent is only fired by the server when the turn_detection is enabled.  # noqa: E501
+        # When using the server-side turn_detection, we don't allow allow_interruptions to be False.
         try:
-            self.interrupt(omit_rt_interrupt=True)
+            self.interrupt()  # input_speech_started is also interrupting on the serverside realtime session  # noqa: E501
         except RuntimeError:
             logger.exception(
                 "RealtimeAPI input_speech_started, but current speech is not interruptable, this should never happen!"  # noqa: E501
